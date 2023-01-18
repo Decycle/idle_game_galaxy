@@ -1,4 +1,5 @@
 import React, {
+  forwardRef,
   useCallback,
   useEffect,
   useMemo,
@@ -7,447 +8,343 @@ import React, {
 } from 'react'
 import './App.css'
 
-import Vector3 from './utils/Vector3'
-import Physics3D from './utils/Physics3D'
-
 import pointShader from './shaders/point'
 import lineShader from './shaders/line'
-import { mat4 } from 'gl-matrix'
+import { Canvas } from '@react-three/fiber'
+import { IUniform, Vector3 } from 'three'
+import { button, useControls } from 'leva'
+import {
+  OrbitControls,
+  OrthographicCamera,
+  PerspectiveCamera,
+} from '@react-three/drei'
 
-const GraphCanvas = ({ clicks }: { clicks: Number }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+type Uniforms = {
+  [uniform: string]: IUniform<any>
+}
 
-  const points = useMemo(
-    () => [
-      new Physics3D(
-        { mass: 1, bounce: 0.6 },
-        new Vector3(300, 119, 150)
-      ),
-      new Physics3D(
-        { mass: 1, bounce: 0.6 },
-        new Vector3(420, 189, 200)
-      ),
-      new Physics3D(
-        { mass: 1, bounce: 0.6 },
-        new Vector3(420, 305, 350)
-      ),
-      new Physics3D(
-        { mass: 1, bounce: 0.6 },
-        new Vector3(800, 305, 500)
-      ),
-    ],
-    []
+const PointMaterial = ({
+  uniforms,
+}: {
+  uniforms?: Uniforms
+}) => {
+  return (
+    <shaderMaterial
+      attach='material'
+      fragmentShader={pointShader.fragment}
+      vertexShader={pointShader.vertex}
+      uniforms={uniforms}
+    />
+  )
+}
+
+interface MeshProps {
+  vertices: Float32Array
+  uniforms?: Uniforms
+}
+
+interface PointMeshProps extends MeshProps {
+  vertexCount: number
+  size?: Float32Array
+}
+
+const PointMesh = forwardRef<
+  THREE.BufferGeometry,
+  PointMeshProps
+>(
+  (
+    { vertices, uniforms, vertexCount }: PointMeshProps,
+    ref
+  ) => {
+    return (
+      <points>
+        <bufferGeometry ref={ref}>
+          <bufferAttribute
+            attach='attributes-position'
+            array={vertices}
+            itemSize={3}
+            count={vertexCount}
+          />
+        </bufferGeometry>
+        <PointMaterial uniforms={uniforms} />
+      </points>
+    )
+  }
+)
+
+const LineMaterial = ({
+  uniforms,
+}: {
+  uniforms?: Uniforms
+}) => {
+  return (
+    <shaderMaterial
+      attach='material'
+      fragmentShader={lineShader.fragment}
+      vertexShader={lineShader.vertex}
+      uniforms={uniforms}
+    />
+  )
+}
+
+interface LineMeshProps extends MeshProps {
+  lineCount: number
+  tensions: Float32Array
+}
+
+const LineMesh = forwardRef<
+  THREE.BufferGeometry,
+  LineMeshProps
+>(
+  (
+    {
+      vertices,
+      tensions,
+      uniforms,
+      lineCount,
+    }: LineMeshProps,
+    ref
+  ) => {
+    return (
+      <lineSegments>
+        <bufferGeometry ref={ref}>
+          <bufferAttribute
+            attach='attributes-position'
+            array={vertices}
+            itemSize={3}
+            count={lineCount * 2}
+          />
+          <bufferAttribute
+            attach='attributes-tension'
+            array={tensions}
+            itemSize={1}
+            count={lineCount * 2}
+          />
+        </bufferGeometry>
+        <LineMaterial uniforms={uniforms} />
+      </lineSegments>
+    )
+  }
+)
+
+const getVector3 = (array: Float32Array, index: number) => {
+  return new Vector3(
+    array[index * 3],
+    array[index * 3 + 1],
+    array[index * 3 + 2]
+  )
+}
+
+const updateVector3 = (
+  array: Float32Array,
+  index: number,
+  newVector: Vector3
+) => {
+  array[index * 3] = newVector.x
+  array[index * 3 + 1] = newVector.y
+  array[index * 3 + 2] = newVector.z
+}
+
+const addVector3 = (
+  array: Float32Array,
+  index: number,
+  newVector: Vector3
+) => {
+  array[index * 3] += newVector.x
+  array[index * 3 + 1] += newVector.y
+  array[index * 3 + 2] += newVector.z
+}
+
+const GameCanvas = () => {
+  const pointsRef = useRef<THREE.BufferGeometry>(null)
+  const linesRef = useRef<THREE.BufferGeometry>(null)
+
+  const [pointCount, setPointCount] = useState(2)
+  const [lineCount, setLineCount] = useState(1)
+
+  const maxPointCount = 100
+  const maxLineCount = 1000
+
+  const vertices = useRef(
+    new Float32Array(maxPointCount * 3)
   )
 
-  const lines = useMemo(
-    () => [
-      [0, 1],
-      [0, 2],
-      [1, 2],
-      [2, 3],
-      [1, 3],
-      [0, 3],
-    ],
-    []
+  vertices.current[0] = 0
+  vertices.current[1] = 0
+  vertices.current[2] = 0
+
+  vertices.current[3] = 1
+  vertices.current[4] = 1
+  vertices.current[5] = 0
+
+  //change ref name
+  const verticesVel = useRef(
+    new Float32Array(maxPointCount * 3)
+  )
+  const verticesAcc = useRef(
+    new Float32Array(maxPointCount * 3)
   )
 
-  const relaxedLength = 300
-  const stringConstant = 0.1
+  const lineIndex = useRef(
+    new Uint16Array(maxLineCount * 2)
+  )
+
+  lineIndex.current[0] = 0
+  lineIndex.current[1] = 1
+
+  const lines = useRef(
+    new Float32Array(maxLineCount * 2 * 3)
+  )
+
+  const tensions = useRef(
+    new Float32Array(maxLineCount * 2)
+  )
+
+  const springRestLength = 3
+  const springStiffness = 2
+  const springDamping = 0.5
 
   const update = useCallback(() => {
-    points.forEach((point) => {
-      point.update(1 / 60)
-    })
+    //update all connected vertices's acceleration
+    for (let i = 0; i < lineCount * 2; i += 2) {
+      const index1 = lineIndex.current[i]
+      const index2 = lineIndex.current[i + 1]
 
-    lines.forEach((line) => {
-      const point1 = points[line[0]]
-      const point2 = points[line[1]]
+      const vertex1 = getVector3(vertices.current, index1)
+      const vertex2 = getVector3(vertices.current, index2)
 
-      const dist = point1.position.distanceTo(
-        point2.position
+      const vertex1Vel = getVector3(
+        verticesVel.current,
+        index1
+      )
+      const vertex2Vel = getVector3(
+        verticesVel.current,
+        index2
       )
 
-      const force = (relaxedLength - dist) * stringConstant
-      const dir = point1.position
-        .sub(point2.position)
-        .normalized()
+      const distance = vertex1.distanceTo(vertex2)
+      const direction = vertex1
+        .clone()
+        .sub(vertex2)
+        .normalize()
 
-      point1.force.addFrom(dir.mulScalar(force))
-      point2.force.addFrom(dir.mulScalar(-force))
+      const springForce = direction
+        .clone()
+        .multiplyScalar(
+          (distance - springRestLength) * springStiffness
+        )
 
-      console.log(force)
-    })
-  }, [points, lines])
+      const dampingForce1 = vertex1Vel
+        .clone()
+        .multiplyScalar(-springDamping)
 
-  useEffect(() => {
-    const id = setInterval(update, 1000 / 60)
-    return () => clearInterval(id)
-  }, [update])
+      const dampingForce2 = vertex2Vel
+        .clone()
+        .multiplyScalar(-springDamping)
 
-  const drawPoint = (pos: Vector3) => {
-    const z = pos.z / 100
-    const depth = Math.min(Math.max(1 / z, 0), 1)
+      const vertex1Force = springForce
+        .clone()
+        .negate()
+        .add(dampingForce1)
+      const vertex2Force = springForce
+        .clone()
+        .add(dampingForce2)
 
-    // console.log(z)
-    console.log(depth)
-
-    return [pos.x * depth, pos.y * depth, depth]
-  }
-
-  const draw = useCallback(
-    (ctx: CanvasRenderingContext2D) => {
-      //clear canvas
-      ctx.clearRect(0, 0, 1920, 1080)
-
-      ctx.fillStyle = 'white'
-      ctx.strokeStyle = 'white'
-
-      points.forEach((point) => {
-        const circle = new Path2D()
-
-        const [x, y, depth] = drawPoint(point.position)
-
-        circle.arc(x, y, depth * 10, 0, 2 * Math.PI)
-        ctx.fill(circle)
-      })
-
-      lines.forEach((line) => {
-        const point1 = points[line[0]]
-        const point2 = points[line[1]]
-
-        const [x1, y1] = drawPoint(point1.position)
-        const [x2, y2] = drawPoint(point2.position)
-
-        ctx.beginPath()
-        ctx.moveTo(x1, y1)
-        ctx.lineTo(x2, y2)
-        ctx.stroke()
-      })
-
-      requestAnimationFrame(() => draw(ctx))
-    },
-    [points, lines]
-  )
-
-  React.useEffect(() => {
-    const canvas = canvasRef.current
-    const context = canvas?.getContext('2d')
-    if (context) {
-      draw(context)
+      addVector3(verticesAcc.current, index1, vertex1Force)
+      addVector3(verticesAcc.current, index2, vertex2Force)
     }
-  }, [draw])
 
-  return (
-    <canvas
-      ref={canvasRef}
-      height={1080}
-      width={1920}></canvas>
-  )
-}
+    //update velocity and position
+    for (let i = 0; i < pointCount * 3; i++) {
+      verticesVel.current[i] += verticesAcc.current[i] / 60
+      vertices.current[i] += verticesVel.current[i] / 60
 
-const loadShader = (
-  gl: WebGLRenderingContext,
-  type: number,
-  source: string
-) => {
-  const shader = gl.createShader(type)
-
-  if (shader) {
-    gl.shaderSource(shader, source)
-    gl.compileShader(shader)
-
-    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      return shader
-    } else {
-      console.error(
-        `An error occurred compiling the shaders: ${gl.getShaderInfoLog(
-          shader
-        )}`
-      )
-      gl.deleteShader(shader)
+      verticesAcc.current[i] = 0
     }
-  }
-}
 
-const initShaderProgram = (
-  gl: WebGLRenderingContext,
-  vsSource: string,
-  fsSource: string
-) => {
-  const vertexShader = loadShader(
-    gl,
-    gl.VERTEX_SHADER,
-    vsSource
-  )
-  const fragmentShader = loadShader(
-    gl,
-    gl.FRAGMENT_SHADER,
-    fsSource
-  )
+    for (let i = 0; i < lineCount * 2; i += 2) {
+      const index1 = lineIndex.current[i]
+      const index2 = lineIndex.current[i + 1]
 
-  const shaderProgram = gl.createProgram()
-  if (!vertexShader || !fragmentShader || !shaderProgram)
-    return
+      const vertex1 = getVector3(vertices.current, index1)
+      const vertex2 = getVector3(vertices.current, index2)
 
-  gl.attachShader(shaderProgram, vertexShader)
-  gl.attachShader(shaderProgram, fragmentShader)
-  gl.linkProgram(shaderProgram)
+      //update line
+      updateVector3(lines.current, i, vertex1)
+      updateVector3(lines.current, i + 1, vertex2)
 
-  if (
-    gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)
-  ) {
-    return shaderProgram
-  } else {
-    console.error(
-      `Unable to initialize the shader program: ${gl.getProgramInfoLog(
-        shaderProgram
-      )}`
-    )
-  }
-}
+      //update tension
+      const distance = vertex1.distanceTo(vertex2)
 
-const initBuffers = (gl: WebGLRenderingContext) => {
-  const pointPositionBuffer = gl.createBuffer()
-  const linePositionBuffer = gl.createBuffer()
+      tensions.current[i] = distance / springRestLength
+      tensions.current[i + 1] = distance / springRestLength
 
-  const pointPositions = [1.0, 1.0, 0.0, -1.0, 1.0, 0.0]
-  const linePositions = [1.0, 1.0, 0.0, -1.0, 1.0, 0.0]
+      // tensions.current[i] = 0
+      // tensions.current[i + 1] = 0
+    }
 
-  gl.bindBuffer(gl.ARRAY_BUFFER, pointPositionBuffer)
-  gl.bufferData(
-    gl.ARRAY_BUFFER,
-    new Float32Array(pointPositions),
-    gl.DYNAMIC_DRAW
-  )
+    if (pointsRef.current) {
+      pointsRef.current.attributes.position.needsUpdate =
+        true
+    }
 
-  gl.bindBuffer(gl.ARRAY_BUFFER, linePositionBuffer)
-  gl.bufferData(
-    gl.ARRAY_BUFFER,
-    new Float32Array(linePositions),
-    gl.DYNAMIC_DRAW
-  )
-
-  return {
-    pointPosition: pointPositionBuffer,
-    linePosition: linePositionBuffer,
-  }
-}
-
-const WebGLCanvas = () => {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-
-  const init = useCallback(
-    (
-      gl: WebGLRenderingContext,
-      canvas: HTMLCanvasElement
-    ) => {
-      gl.clearColor(0.0, 0.0, 0.0, 1.0)
-      gl.clearDepth(1.0)
-      gl.enable(gl.DEPTH_TEST)
-      gl.depthFunc(gl.LEQUAL)
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-
-      const fieldOfView = (45 * Math.PI) / 180
-      const aspect =
-        canvas.clientWidth / canvas.clientHeight
-      const zNear = 0.1
-      const zFar = 100.0
-
-      const projectionMatrix = mat4.create()
-
-      mat4.perspective(
-        projectionMatrix,
-        fieldOfView,
-        aspect,
-        zNear,
-        zFar
-      )
-
-      const modelViewMatrix = mat4.create()
-
-      mat4.translate(
-        modelViewMatrix,
-        modelViewMatrix,
-        [0.0, 0.0, -6.0]
-      )
-
-      const pointShaderProgram = initShaderProgram(
-        gl,
-        pointShader.vertex,
-        pointShader.fragment
-      )
-
-      if (!pointShaderProgram) return
-      const pointProgramInfo = {
-        program: pointShaderProgram,
-        attribLocations: {
-          vertexPosition: gl.getAttribLocation(
-            pointShaderProgram,
-            'aVertexPosition'
-          ),
-        },
-        uniformLocations: {
-          projectionMatrix: gl.getUniformLocation(
-            pointShaderProgram,
-            'uProjectionMatrix'
-          ),
-          modelViewMatrix: gl.getUniformLocation(
-            pointShaderProgram,
-            'uModelViewMatrix'
-          ),
-        },
-      }
-      const lineShaderProgram = initShaderProgram(
-        gl,
-        lineShader.vertex,
-        lineShader.fragment
-      )
-
-      if (!lineShaderProgram) return
-
-      const lineProgramInfo = {
-        program: lineShaderProgram,
-        attribLocations: {
-          vertexPosition: gl.getAttribLocation(
-            lineShaderProgram,
-            'aVertexPosition'
-          ),
-        },
-        uniformLocations: {
-          projectionMatrix: gl.getUniformLocation(
-            lineShaderProgram,
-            'uProjectionMatrix'
-          ),
-          modelViewMatrix: gl.getUniformLocation(
-            lineShaderProgram,
-            'uModelViewMatrix'
-          ),
-        },
-      }
-
-      const buffers = initBuffers(gl)
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffers.pointPosition)
-      gl.vertexAttribPointer(
-        pointProgramInfo.attribLocations.vertexPosition,
-        3,
-        gl.FLOAT,
-        false,
-        4 * 3, //or 0 => automatically calculate sizeof(Float) * 3
-        0
-      )
-      gl.enableVertexAttribArray(
-        pointProgramInfo.attribLocations.vertexPosition
-      )
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffers.linePosition)
-      gl.vertexAttribPointer(
-        lineProgramInfo.attribLocations.vertexPosition,
-        3,
-        gl.FLOAT,
-        false,
-        4 * 3, //or 0 => automatically calculate sizeof(Float) * 3
-        0
-      )
-
-      gl.enableVertexAttribArray(
-        lineProgramInfo.attribLocations.vertexPosition
-      )
-
-      gl.useProgram(pointProgramInfo.program)
-      gl.uniformMatrix4fv(
-        pointProgramInfo.uniformLocations.projectionMatrix,
-        false,
-        projectionMatrix
-      )
-
-      gl.uniformMatrix4fv(
-        pointProgramInfo.uniformLocations.modelViewMatrix,
-        false,
-        modelViewMatrix
-      )
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffers.pointPosition)
-      gl.drawArrays(gl.POINTS, 0, 2)
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffers.linePosition)
-      gl.useProgram(lineProgramInfo.program)
-
-      gl.uniformMatrix4fv(
-        lineProgramInfo.uniformLocations.projectionMatrix,
-        false,
-        projectionMatrix
-      )
-
-      gl.uniformMatrix4fv(
-        lineProgramInfo.uniformLocations.modelViewMatrix,
-        false,
-        modelViewMatrix
-      )
-
-      gl.drawArrays(gl.LINES, 0, 2)
-    },
-    []
-  )
-
-  const draw = useCallback((gl: WebGLRenderingContext) => {
-    gl.drawArrays(gl.POINTS, 0, 2)
-    const new_position = [1.0, 1.0, 0.0, -1.0, 1.0, 0.0]
-    // new_position[0] = Math.random()
-    // new_position[1] = Math.random()
-    // new_position[3] = Math.random()
-    // new_position[4] = Math.random()
-    gl.bufferSubData(
-      gl.ARRAY_BUFFER,
-      0,
-      new Float32Array(new_position)
-    )
-    gl.drawArrays(gl.POINTS, 0, 2)
-    requestAnimationFrame(() => draw(gl))
+    if (linesRef.current) {
+      linesRef.current.attributes.position.needsUpdate =
+        true
+      linesRef.current.attributes.tension.needsUpdate = true
+    }
   }, [])
 
+  const addPoint = () => {
+    const index = pointCount * 3
+    const x = Math.random() * 10 - 5
+    const y = Math.random() * 10 - 5
+    const z = Math.random() * 10 - 5
+
+    vertices.current[index] = x
+    vertices.current[index + 1] = y
+    vertices.current[index + 2] = z
+
+    setPointCount(pointCount + 1)
+    console.log(pointCount)
+  }
+
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const gl = canvas.getContext('webgl')
-    if (!gl) return
-    init(gl, canvas)
-    draw(gl)
-  })
+    // update()
+    const id = setInterval(update, 1000 / 60)
+    return () => {
+      clearInterval(id)
+    }
+  }, [update])
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={1440}
-      height={720}></canvas>
+    <Canvas>
+      <PerspectiveCamera
+        makeDefault
+        position={[0, 0, 10]}
+      />
+      <OrbitControls />
+      <LineMesh
+        vertices={lines.current}
+        tensions={tensions.current}
+        lineCount={lineCount}
+        ref={linesRef}
+      />
+      <PointMesh
+        vertices={vertices.current}
+        vertexCount={pointCount}
+        ref={pointsRef}
+      />
+    </Canvas>
   )
 }
 
-function App() {
-  const [counter, setCounter] = useState(0)
+const App = () => {
+  const [pointCount, setPointCount] = useState(2)
 
   return (
     <div className='App'>
-      <WebGLCanvas />
-      <button
-        className='click_button'
-        onClick={() => setCounter(counter + 1)}>
-        CLICK ME
-        <svg
-          className='click_button_icon'
-          width='30'
-          height='30'>
-          <circle
-            cx='15'
-            cy='15'
-            r='10'
-            stroke='black'
-            strokeWidth='1'
-            fill='currentColor'
-          />
-        </svg>
-      </button>
-      {counter}
+      <GameCanvas />
     </div>
   )
 }
