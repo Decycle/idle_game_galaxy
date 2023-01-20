@@ -26,6 +26,7 @@ void main()
     vec3 blue = vec3(0.0, 0.0, 1.0);
     vec3 green = vec3(0.0, 1.0, 0.0);
     vec3 red = vec3(1.0, 0.0, 0.0);
+    vec3 darkRed = vec3(0.2, 0.0, 0.0);
 
     vec3 color;
 
